@@ -1,0 +1,49 @@
+# nginx site for the Bullwinkle's marketing site — lab980 droplet convention:
+# /etc/nginx/sites-available/<fqdn> symlinked into sites-enabled/.
+#
+# Placeholders to replace (bin/bw vhost does this):
+#   __FQDN__     e.g. bw.lab980.com   (or an apex like bullwinkles.example.com)
+#   __APP_DIR__  e.g. /var/www/bw
+#
+# TLS is added by certbot (`certbot --nginx -d __FQDN__ --redirect`), which
+# rewrites this file to add the 443 server block + HTTP->HTTPS redirect.
+#
+# Pure static site: no app server, no /api proxy. The web root is the
+# atomically-swapped release symlink `current` (a copy of the repo's site/).
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __FQDN__;
+
+    root __APP_DIR__/current;
+    index index.html;
+
+    # Fingerprint-free filenames here (no build hashing), so cache media and
+    # styles for a week rather than forever — a redeploy should be picked up
+    # within a reasonable window.
+    location /assets/ {
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+    }
+
+    # HTML is the entry point — keep it fresh so new deploys show up promptly.
+    location ~* \.html$ {
+        add_header Cache-Control "no-cache";
+    }
+
+    # Clean URLs: /wilsonville -> /wilsonville/index.html; unknown paths 404
+    # to the app's own pages rather than silently rewriting to the home page.
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # A couple of sensible hardening headers for a public marketing site.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Don't log favicon/robots noise.
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+}

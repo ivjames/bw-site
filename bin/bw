@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# bw — operate CLI for the Bullwinkle's marketing site (lab980 convention: each
+# site ships bin/<name>). This is a pure static site — no build step, no app
+# server, no database — so bring-up is just: publish the static web root behind
+# nginx + TLS. Symlink onto PATH once on the droplet:
+#
+#   ln -sf /var/www/bw/bin/bw /usr/local/bin/bw
+#
+# Typical bring-up (after `provision-site bw ivjames/bw-site` clones the repo):
+#   bw setup                 # vhost + TLS + first atomic publish
+# Routine updates thereafter:  bw deploy
+#
+# Subcommands:
+#   setup     one-time: nginx vhost + TLS, then first atomic publish
+#   deploy    pull main -> publish web root atomically -> reload nginx (redeploy)
+#   publish   re-publish the current checkout without pulling
+#   vhost     (re)write the nginx vhost + (re)issue TLS
+#   rollback  swap `current` back to the previous release
+#   releases  list retained releases (newest first)
+set -euo pipefail
+
+# Resolve the app dir from this script's own location (…/bw/bin/bw -> …/bw),
+# so the stub (dir name) drives the FQDN by default: bw -> bw.lab980.com.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+APP_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+STUB="$(basename "$APP_DIR")"
+FQDN="${BW_FQDN:-$STUB.lab980.com}"             # override: BW_FQDN=bullwinkles.lab980.com
+WEBROOT="$APP_DIR/site"                          # static content lives in site/
+BRANCH="${BW_BRANCH:-main}"
+KEEP="${BW_KEEP:-5}"                             # published releases to retain
+
+c_b=$'\033[1;34m'; c_r=$'\033[1;31m'; c_o=$'\033[0m'
+log(){ printf '%s==>%s %s\n' "$c_b" "$c_o" "$*"; }
+die(){ printf '%serror:%s %s\n' "$c_r" "$c_o" "$*" >&2; exit 1; }
+
+# Publish the static web root into a fresh release dir and swap the `current`
+# symlink atomically — never rsync into the served dir in place, or a visitor
+# mid-deploy can load index.html against half-updated assets.
+publish_release(){
+  [ -d "$WEBROOT" ] || die "missing web root: $WEBROOT"
+  [ -f "$WEBROOT/index.html" ] || die "no index.html under $WEBROOT"
+  local ts release
+  ts="$(date +%Y%m%d%H%M%S)"
+  release="$APP_DIR/releases/$ts"
+  mkdir -p "$release"
+  log "Publishing web root -> $release"
+  cp -r "$WEBROOT/." "$release/"
+  ln -sfn "$release" "$APP_DIR/current.tmp"
+  mv -Tf "$APP_DIR/current.tmp" "$APP_DIR/current"
+  log "current -> $ts"
+  ls -1dt "$APP_DIR/releases"/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
+}
+
+cmd_vhost(){
+  [ -f "$APP_DIR/deploy/nginx.conf.template" ] || die "missing deploy/nginx.conf.template"
+  local conf="/etc/nginx/sites-available/$FQDN"
+  log "Writing static vhost $conf (root current)"
+  sed -e "s/__FQDN__/$FQDN/g" -e "s#__APP_DIR__#$APP_DIR#g" \
+    "$APP_DIR/deploy/nginx.conf.template" > "$conf"
+  ln -sf "$conf" "/etc/nginx/sites-enabled/$FQDN"
+  nginx -t && systemctl reload nginx
+  if command -v certbot >/dev/null; then
+    log "Issuing/refreshing TLS for $FQDN"
+    certbot --nginx -d "$FQDN" --redirect -n --agree-tos \
+      -m "${CERTBOT_EMAIL:-ivjames@gmail.com}" \
+      || log "certbot did not complete (DNS still propagating?). Re-run later: bw vhost"
+  else
+    log "certbot not found — install it, then: bw vhost"
+  fi
+}
+
+cmd_deploy(){
+  cd "$APP_DIR"
+  log "Fetching origin/$BRANCH"
+  git fetch --quiet origin "$BRANCH"
+  git checkout --quiet "$BRANCH"
+  git reset --hard --quiet "origin/$BRANCH"
+  publish_release
+  nginx -t && systemctl reload nginx
+  log "Deployed $STUB -> https://$FQDN"
+}
+
+cmd_setup(){
+  [ "$(id -u)" -eq 0 ] || die "run as root (writes nginx + runs certbot)."
+  publish_release
+  cmd_vhost
+  log "Setup complete: https://$FQDN"
+}
+
+cmd_rollback(){
+  local prev
+  prev="$(ls -1dt "$APP_DIR/releases"/*/ 2>/dev/null | sed -n 2p)"
+  [ -n "$prev" ] || die "no previous release to roll back to"
+  ln -sfn "${prev%/}" "$APP_DIR/current.tmp"
+  mv -Tf "$APP_DIR/current.tmp" "$APP_DIR/current"
+  log "Rolled back current -> $(basename "${prev%/}")"
+}
+
+case "${1:-}" in
+  setup)            cmd_setup ;;
+  deploy|redeploy)  cmd_deploy ;;
+  publish)          publish_release ;;
+  vhost)            cmd_vhost ;;
+  rollback)         cmd_rollback ;;
+  releases)         ls -1dt "$APP_DIR/releases"/*/ 2>/dev/null | xargs -r -n1 basename || true ;;
+  ''|-h|--help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$SELF"
+    ;;
+  *) die "unknown command: $1 (run 'bw --help')" ;;
+esac

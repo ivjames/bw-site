@@ -1,0 +1,10 @@
+# lab980 publish artifacts (created on the droplet by bin/bw)
+releases/
+current
+current.tmp
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.log
