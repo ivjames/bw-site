@@ -53,12 +53,39 @@ publish_release(){
 
 cmd_vhost(){
   [ -f "$APP_DIR/deploy/nginx.conf.template" ] || die "missing deploy/nginx.conf.template"
-  local conf="/etc/nginx/sites-available/$FQDN"
+  local conf="/etc/nginx/sites-available/$FQDN" link="/etc/nginx/sites-enabled/$FQDN"
+  local prev_conf="" prev_link
+  # sites-enabled entries are symlinks here. A regular file at that path is
+  # someone's hand-placed config; `ln -sf` would replace it and the rollback
+  # below would then delete it, so refuse before anything is written.
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    die "$link exists and is not a symlink — refusing to replace it. Move it aside, then re-run: bw vhost"
+  fi
+  # This rewrites the vhost on purpose (setup replaces provision-site's proxy
+  # vhost with it), so keep a copy of the old one to put back if nginx rejects
+  # the new one ('' = there was none before this run).
+  if [ -f "$conf" ]; then
+    prev_conf="$(mktemp)"
+    cat "$conf" > "$prev_conf"
+  fi
   log "Writing static vhost $conf (root current)"
   sed -e "s/__FQDN__/$FQDN/g" -e "s#__APP_DIR__#$APP_DIR#g" \
     "$APP_DIR/deploy/nginx.conf.template" > "$conf"
-  ln -sf "$conf" "/etc/nginx/sites-enabled/$FQDN"
-  nginx -t && systemctl reload nginx
+  prev_link="$(readlink "$link" 2>/dev/null || true)"   # '' = no symlink before this run
+  ln -sfn "$conf" "$link"
+  # An explicit branch, not `nginx -t && systemctl reload nginx`: under set -e
+  # a failing left side of && is exempt from errexit, so that form left a
+  # rejected vhost enabled on disk and carried on to certbot — and the next
+  # reload or reboot took every site on the box down with it. Undo exactly
+  # what this run put there, then stop.
+  if ! nginx -t; then
+    if [ -n "$prev_conf" ]; then cat "$prev_conf" > "$conf"; rm -f "$prev_conf"; else rm -f "$conf"; fi
+    if [ -z "$prev_link" ]; then rm -f "$link"; else ln -sfn "$prev_link" "$link"; fi
+    die "nginx -t rejected the new vhost; put $conf and its sites-enabled link back as they were before this run. Fix deploy/nginx.conf.template and re-run: bw vhost"
+  fi
+  [ -z "$prev_conf" ] || rm -f "$prev_conf"
+  systemctl reload nginx \
+    || die "nginx -t passed but the reload failed — $conf is on disk and enabled; nginx is still serving its previous config. Check: systemctl status nginx"
   if command -v certbot >/dev/null; then
     log "Issuing/refreshing TLS for $FQDN"
     certbot --nginx -d "$FQDN" --redirect -n --agree-tos \
@@ -76,7 +103,14 @@ cmd_deploy(){
   git checkout --quiet "$BRANCH"
   git reset --hard --quiet "origin/$BRANCH"
   publish_release
-  nginx -t && systemctl reload nginx
+  # Not `nginx -t && systemctl reload nginx`: under set -e a failing left side
+  # of && is exempt from errexit, so that form logged "Deployed" over a config
+  # nginx had just rejected. Nothing here wrote the vhost, so there is nothing
+  # to undo — just stop, and say so.
+  nginx -t \
+    || die "nginx -t failed; not reloading. The release is published under current/ (nginx serves it either way) but the config on disk is broken — fix it, or re-run: bw vhost"
+  systemctl reload nginx \
+    || die "nginx -t passed but the reload failed — nginx is still serving its previous config. Check: systemctl status nginx"
   log "Deployed $STUB -> https://$FQDN"
 }
 
