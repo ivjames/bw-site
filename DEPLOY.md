@@ -17,12 +17,25 @@ lab980 per-site tooling convention), so bring-up is a single command.
 
 ## First-time provisioning
 
+> **Don't export `GITHUB_TOKEN` for this.** `ivjames/bw-site` is a **public**
+> repo — verified 2026-09-07, the GitHub API reports `private: false` — so the
+> clone needs no credential. This section used to say otherwise and tell you to
+> export a token into the shell that then runs `provision-site`.
+>
+> That is not a harmless surplus step on this droplet. pm2 copies the
+> environment of whatever shell starts a process into the process *and* into
+> `~/.pm2/dump.pm2`, where it acquires an indefinite on-disk lifetime; the
+> 2026-09-05 audit found `GITHUB_TOKEN` in **18 of 21** pm2 registrations, none
+> of which had asked for it. An exported token in the provisioning shell is one
+> of the ways it got there — and here it bought nothing.
+
+
 Run as **root on the droplet**. Subdomain `bw.lab980.com` throughout; change the
 `bw` label if you want a different one (and set `BW_FQDN` for `bw setup`).
 
 ```bash
 # 1. Subdomain shell: DNS + clone + dir. One command.
-#    (ivjames/bw-site is private — export GITHUB_TOKEN=ghp_... first so the clone auths.)
+#    (ivjames/bw-site is PUBLIC — no token needed. See the note below.)
 provision-site bw ivjames/bw-site
 
 # 2. Symlink the operate CLI onto PATH (once), then let it do the rest:
@@ -57,6 +70,22 @@ Other operate commands:
 - `bw vhost`     — rewrite the nginx vhost + re-issue TLS
 
 ## Verify after deploy
+
+A 200 only proves nginx answered, not which release `current` points at. Ask
+for the deployed commit as well as loading the page:
+
+```bash
+bw releases                       # newest first; `current` should be the top one
+git -C /var/www/bw rev-parse HEAD
+git -C /var/www/bw fetch -q origin main && git -C /var/www/bw rev-parse origin/main
+```
+
+The two SHAs should match after a deploy. Compare against `origin/main` after a
+fetch rather than local `main`: a stale clone and a stale deploy hash
+identically, so the local-branch form of the check passes in exactly the case it
+exists to catch. Note that the blob-hash comparison used on the other lab980
+static sites does not apply here — the served root is `current/`, a symlink into
+`releases/`, not the checkout.
 
 - `https://<fqdn>/` loads over TLS (padlock) and shows the location picker.
 - The hero video autoplays; the *Eat. Play. Repeat.* carousel advances.
