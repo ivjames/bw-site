@@ -19,16 +19,27 @@ server {
     root __APP_DIR__/current;
     index index.html;
 
+    # Shared security headers. Carried here rather than added on the box,
+    # because `bw vhost` re-renders this template over the installed vhost and
+    # would wipe anything fix-security-headers had put there.
+    include snippets/lab980-security-headers.conf;
+
     # Fingerprint-free filenames here (no build hashing), so cache media and
     # styles for a week rather than forever — a redeploy should be picked up
     # within a reasonable window.
     location /assets/ {
         expires 7d;
+        # nginx does not merge add_header across contexts: setting one here
+        # drops the server-level headers, so they are restated.
+        include snippets/lab980-security-headers.conf;
         add_header Cache-Control "public, max-age=604800";
     }
 
     # HTML is the entry point — keep it fresh so new deploys show up promptly.
     location ~* \.html$ {
+        # `index index.html` internally redirects "/" here, so without this
+        # include the HOMEPAGE serves with no security headers at all.
+        include snippets/lab980-security-headers.conf;
         add_header Cache-Control "no-cache";
     }
 
@@ -37,11 +48,6 @@ server {
     location / {
         try_files $uri $uri/ =404;
     }
-
-    # A couple of sensible hardening headers for a public marketing site.
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     # Don't log favicon/robots noise.
     location = /favicon.ico { access_log off; log_not_found off; }
